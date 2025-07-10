@@ -16,6 +16,14 @@ class Send2Ue(bpy.types.Operator):
     """Push your assets to disk and/or an open unreal editor instance"""
     bl_idname = "wm.send2ue"
     bl_label = "Push Assets"
+    __slots__ = (
+        "timer",
+        "escape",
+        "done",
+        "max_step",
+        "state",
+        "execution_queue",
+    )
 
     def __init__(self):
         self.timer = None
@@ -343,4 +351,3 @@ def unregister():
     for operator_class in operator_classes:
         if utilities.get_operator_class_by_bl_idname(operator_class.bl_idname):
             bpy.utils.unregister_class(operator_class)
-
