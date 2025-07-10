@@ -16,6 +16,7 @@ class Send2Ue(bpy.types.Operator):
     """Push your assets to disk and/or an open unreal editor instance"""
     bl_idname = "wm.send2ue"
     bl_label = "Push Assets"
+
     # Blender 4.4 requires operators that define ``__init__`` to use slots
     __slots__ = (
         "timer",
