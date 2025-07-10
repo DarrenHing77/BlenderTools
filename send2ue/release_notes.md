@@ -13,5 +13,5 @@
 @SalamiArmi, @namrog84
 
 ## Tests Passing On
-* Blender `3.3`, `3.6` (installed from blender.org)
-* Unreal `5.3`
+* Blender `3.3`, `3.6`, `4.4` (installed from blender.org)
+* Unreal `5.3`, `5.6`
