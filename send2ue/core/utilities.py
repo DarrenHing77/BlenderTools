@@ -15,6 +15,83 @@ from ..constants import BlenderTypes, UnrealTypes, ToolInfo, PreFixToken, PathMo
 from mathutils import Vector, Quaternion
 
 
+def disable_particles(mesh_object):
+    """
+    Disables all particle systems on a mesh object and returns their previous state.
+    
+    :param object mesh_object: A mesh object with particle systems.
+    :return dict: Dictionary containing the previous display state of particle systems.
+    """
+    existing_display_options = {}
+    
+    if hasattr(mesh_object, 'particle_systems'):
+        for i, particle_system in enumerate(mesh_object.particle_systems):
+            # Store the current render state
+            existing_display_options[i] = particle_system.settings.use_render_emitter
+            # Disable rendering
+            particle_system.settings.use_render_emitter = False
+    
+    return existing_display_options
+
+
+def restore_particles(mesh_object, existing_display_options):
+    """
+    Restores particle system display options on a mesh object.
+    
+    :param object mesh_object: A mesh object with particle systems.
+    :param dict existing_display_options: Dictionary containing previous display states.
+    """
+    if hasattr(mesh_object, 'particle_systems') and existing_display_options:
+        for i, particle_system in enumerate(mesh_object.particle_systems):
+            if i in existing_display_options:
+                particle_system.settings.use_render_emitter = existing_display_options[i]
+
+
+def set_particles_display_option(mesh_object, visible, only=None):
+    """
+    Sets particle system display options on a mesh object.
+    
+    :param object mesh_object: A mesh object with particle systems.
+    :param bool visible: Whether to make particles visible.
+    :param str only: Optional name of specific particle system to affect.
+    """
+    if hasattr(mesh_object, 'particle_systems'):
+        for particle_system in mesh_object.particle_systems:
+            if only is None or particle_system.name == only:
+                particle_system.settings.use_render_emitter = visible
+
+
+def get_all_particles_display_options():
+    """
+    Gets all particle system display options for all objects in the scene.
+    
+    :return dict: Dictionary mapping object names to their particle display states.
+    """
+    all_options = {}
+    
+    for obj in bpy.data.objects:
+        if hasattr(obj, 'particle_systems') and obj.particle_systems:
+            obj_options = {}
+            for i, particle_system in enumerate(obj.particle_systems):
+                obj_options[i] = particle_system.settings.use_render_emitter
+            all_options[obj.name] = obj_options
+    
+    return all_options
+
+
+def restore_all_particles(all_existing_display_options):
+    """
+    Restores all particle system display options for all objects.
+    
+    :param dict all_existing_display_options: Dictionary mapping object names to display states.
+    """
+    for obj_name, obj_options in all_existing_display_options.items():
+        obj = bpy.data.objects.get(obj_name)
+        if obj and hasattr(obj, 'particle_systems'):
+            for i, particle_system in enumerate(obj.particle_systems):
+                if i in obj_options:
+                    particle_system.settings.use_render_emitter = obj_options[i]
+
 def escape_local_view():
     """
     Escapes local view if currently in local view mode.
