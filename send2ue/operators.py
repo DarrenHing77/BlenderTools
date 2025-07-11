@@ -17,24 +17,21 @@ class Send2Ue(bpy.types.Operator):
     bl_idname = "wm.send2ue"
     bl_label = "Push Assets"
 
-    # Blender 4.4 requires operators that define ``__init__`` to use slots
-    __slots__ = (
-        "timer",
-        "escape",
-        "done",
-        "max_step",
-        "state",
-        "execution_queue",
-    )
-
-    def __init__(self):
-        self.timer = None
-        self.escape = False
-        self.done = False
-        self.max_step = 0
-        self.state = {}
-
-        # add execution queue
+    # Remove __init__ entirely and initialize in invoke/execute
+    def _initialize(self):
+        """Initialize operator state"""
+        if not hasattr(self, 'timer'):
+            self.timer = None
+        if not hasattr(self, 'escape'):
+            self.escape = False
+        if not hasattr(self, 'done'):
+            self.done = False
+        if not hasattr(self, 'max_step'):
+            self.max_step = 0
+        if not hasattr(self, 'state'):
+            self.state = {}
+        
+        # Ensure execution queue exists
         execution_queue = bpy.app.driver_namespace.get(ToolInfo.EXECUTION_QUEUE.value)
         if not execution_queue:
             bpy.app.driver_namespace[ToolInfo.EXECUTION_QUEUE.value] = queue.Queue()
@@ -95,6 +92,9 @@ class Send2Ue(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
+        # Initialize operator state
+        self._initialize()
+        
         if utilities.is_unreal_connected():
             properties = bpy.context.scene.send2ue
             self.pre_operation()
@@ -129,6 +129,9 @@ class Send2Ue(bpy.types.Operator):
             return {'FINISHED'}
 
     def execute(self, context):
+        # Initialize operator state
+        self._initialize()
+        
         if utilities.is_unreal_connected():
             properties = bpy.context.scene.send2ue
             self.pre_operation()
@@ -148,7 +151,7 @@ class Send2Ue(bpy.types.Operator):
         return {'FINISHED'}
 
     def escape_operation(self, context):
-        if self.timer:
+        if hasattr(self, 'timer') and self.timer:
             bpy.types.STATUSBAR_HT_header.remove(self.draw_progress)
             context.window_manager.event_timer_remove(self.timer)
         bpy.context.workspace.status_text_set_internal(None)
@@ -268,7 +271,8 @@ class ReloadExtensions(bpy.types.Operator):
                 if not os.path.exists(extensions_repo_path) or not os.path.isdir(
                     extensions_repo_path
                 ):
-                    self.report(f'"{extensions_repo_path}" is not a folder path on disk.')
+                    # FIXED: Added message type parameter for Blender 4.4 compatibility
+                    self.report({'ERROR'}, f'"{extensions_repo_path}" is not a folder path on disk.')
                     return {'FINISHED'}
 
         extension_factory = extension.ExtensionFactory()

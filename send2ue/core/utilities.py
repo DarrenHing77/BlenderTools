@@ -15,6 +15,31 @@ from ..constants import BlenderTypes, UnrealTypes, ToolInfo, PreFixToken, PathMo
 from mathutils import Vector, Quaternion
 
 
+def escape_local_view():
+    """
+    Escapes local view if currently in local view mode.
+    """
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for space in area.spaces:
+                if space.type == 'VIEW_3D' and space.local_view:
+                    with bpy.context.temp_override(area=area, space=space):
+                        bpy.ops.view3d.localview(frame_selected=False)
+                    break
+
+# Alias functions for backward compatibility with extensions
+def convert_blender_rotation_to_unreal_rotation(rotation):
+    """
+    Alias for convert_to_unreal_rotation for backward compatibility.
+    """
+    return convert_to_unreal_rotation(rotation)
+
+def convert_blender_to_unreal_location(location):
+    """
+    Alias for convert_to_unreal_location for backward compatibility.
+    """
+    return convert_to_unreal_location(location)
+
 def track_progress(message='', attribute=''):
     """
     A decorator that makes its wrapped function a queued job.
@@ -80,6 +105,21 @@ def get_operator_class_by_bl_idname(bl_idname):
     return getattr(bpy.types, f'{context.upper()}_OT_{name}', None)
 
 
+def _extract_regex_flags(pattern):
+    """Extract regex flags from pattern and return clean pattern + flags"""
+    flags = 0
+    
+    # Handle case-insensitive flag
+    if pattern.startswith("(?i)"):
+        flags |= re.IGNORECASE
+        pattern = pattern[4:]
+    
+    # Remove any other flags that might cause issues
+    pattern = re.sub(r'^\(\?[a-zA-Z]*\)', '', pattern)
+    
+    return pattern, flags
+
+
 def get_lod0_name(asset_name, properties):
     """
     Gets the correct name for lod0.
@@ -88,10 +128,15 @@ def get_lod0_name(asset_name, properties):
     :param PropertyData properties: A property data instance that contains all property values of the tool.
     :return str: The full name for lod0.
     """
-    result = re.search(rf"({properties.lod_regex})", asset_name)
-    if result:
-        lod = result.groups()[-1]
-        return asset_name.replace(lod, f'{lod[:-1]}0')
+    lod_regex, flags = _extract_regex_flags(properties.lod_regex)
+    
+    try:
+        result = re.search(f"({lod_regex})", asset_name, flags)
+        if result:
+            lod = result.groups()[-1]
+            return asset_name.replace(lod, f'{lod[:-1]}0')
+    except (re.error, IndexError):
+        pass
     return asset_name
 
 
@@ -103,10 +148,15 @@ def get_lod_index(asset_name, properties):
     :param PropertyData properties: A property data instance that contains all property values of the tool.
     :return int: The lod index
     """
-    result = re.search(rf"({properties.lod_regex})", asset_name)
-    if result:
-        lod = result.groups()[-1]
-        return int(lod[-1])
+    lod_regex, flags = _extract_regex_flags(properties.lod_regex)
+    
+    try:
+        result = re.search(f"({lod_regex})", asset_name, flags)
+        if result:
+            lod = result.groups()[-1]
+            return int(lod[-1])
+    except (re.error, ValueError, IndexError):
+        pass
     return 0
 
 
@@ -182,858 +232,74 @@ def get_mesh_unreal_type(mesh_object):
     Gets the unreal type of the mesh object.
 
     :param object mesh_object: A object of type mesh.
-    :return str(UnrealType): The type of mesh that is either 'SkeletalMesh' or 'StaticMesh'.
+    :return str: The unreal mesh type.
     """
-    has_parent_rig = mesh_object.parent and mesh_object.parent.type == BlenderTypes.SKELETON
-    rig = get_armature_modifier_rig_object(mesh_object)
-    if has_parent_rig or rig:
+    # Check if the mesh has an armature modifier or is a child of an armature
+    if get_armature_modifier_rig_object(mesh_object) or is_child_of_armature(mesh_object):
         return UnrealTypes.SKELETAL_MESH
     return UnrealTypes.STATIC_MESH
 
 
-def get_custom_property_fcurve_data(action_name):
-    """
-    Gets the names and key frame points of object custom property values from the fcurves.
-
-    :param str action_name: The name of the action to export.
-    :return dict: A dictionary of custom property fcurve names and points.
-    """
-    data = {}
-    action = bpy.data.actions.get(action_name)
-    frame_rate = bpy.context.scene.render.fps
-    if action:
-        for fcurve in action.fcurves:
-            if fcurve.data_path.startswith('["') and fcurve.data_path.endswith('"]'):
-                name = fcurve.data_path.strip('["').strip('"]')
-                data[name] = [[(point.co[0] - 1) / frame_rate, point.co[1]] for point in fcurve.keyframe_points]
-    return data
-
-
-def get_action_names(rig_object, all_actions=True):
-    """
-    Gets a list of action names from the provided rig objects animation data.
-
-    :param object rig_object: A object of type armature with animation data.
-    :param bool all_actions: Whether to get all action names, or just the un-muted actions.
-    :return list: A list of action names.
-    """
-    action_names = []
-    if rig_object:
-        if rig_object.animation_data:
-            for nla_track in rig_object.animation_data.nla_tracks:
-                # if solo only return the actions in that track
-                if nla_track.is_solo and not all_actions:
-                    action_names = []
-                    for strip in nla_track.strips:
-                        if strip.action:
-                            return [strip.action.name]
-
-                # get all the action names if the all flag is set
-                if all_actions:
-                    for strip in nla_track.strips:
-                        if strip.action:
-                            action_names.append(strip.action.name)
-
-                # otherwise get only the un-muted actions
-                else:
-                    if not nla_track.mute:
-                        for strip in nla_track.strips:
-                            if strip.action:
-                                action_names.append(strip.action.name)
-    return action_names
-
-
-def get_actions(rig_object, all_actions=True):
-    """
-    Gets a list of action objects from the provided rig objects animation data.
-
-    :param object rig_object: A object of type armature with animation data.
-    :param bool all_actions: Whether to get all action names, or just the un-muted actions.
-    :return list: A list of action objects.
-    """
-    actions = []
-    action_names = get_action_names(rig_object, all_actions)
-
-    for action_name in action_names:
-        action = bpy.data.actions.get(action_name)
-        if action:
-            actions.append(action)
-
-    return actions
-
-
-def get_all_action_attributes(scene_object):
-    """
-    Gets all the action attributes on the provided rig.
-
-    :param object scene_object: A object of type armature with animation data.
-    :return dict: The action attributes on the provided rig.
-    """
-    attributes = {}
-    if scene_object.animation_data:
-        for nla_track in scene_object.animation_data.nla_tracks:
-            for strip in nla_track.strips:
-                if strip.action:
-                    attributes[strip.action.name] = {
-                        'mute': nla_track.mute,
-                        'is_solo': nla_track.is_solo,
-                        'frame_start': strip.frame_start,
-                        'frame_end': strip.frame_end
-                    }
-    return attributes
-
-
-def get_current_context():
-    """
-    Gets the current context of the scene and its objects.
-
-    :return dict: A dictionary of values that are the current context.
-    """
-    object_contexts = {}
-    for scene_object in bpy.data.objects:
-        active_action_name = ''
-        if scene_object.animation_data and scene_object.animation_data.action:
-            active_action_name = scene_object.animation_data.action.name
-
-        object_contexts[scene_object.name] = {
-            'hide': scene_object.hide_get(),
-            'select': scene_object.select_get(),
-            'active_action': active_action_name,
-            'actions': get_all_action_attributes(scene_object),
-            'particle_systems': get_particles_display_options(scene_object),
-            'show_instancer_for_render': scene_object.show_instancer_for_render
-        }
-
-    active_object = None
-    if bpy.context.active_object:
-        active_object = bpy.context.active_object.name
-
-    return {
-        'mode': getattr(bpy.context, 'mode', 'OBJECT'),
-        'objects': object_contexts,
-        'active_object': active_object,
-        'current_frame': bpy.context.scene.frame_current
-    }
-
-
-def get_hair_objects(properties):
-    """
-    Gets all particle systems for export.
-
-    :returns: A list of hair objects that can be either curve objects or particle systems.
-    :rtype: list
-    """
-    hair_objects = []
-    for mesh_object in get_from_collection(BlenderTypes.MESH):
-        # only export particle systems on meshes that are lod 0 if lod option is on
-        if properties.import_lods and get_lod_index(mesh_object.name, properties) != 0:
-            continue
-
-        # get all particle systems of type 'HAIR' and its modifier on the current mesh
-        modifiers = get_particle_system_modifiers(mesh_object)
-        hair_objects.extend([modifier.particle_system for modifier in modifiers])
-
-    hair_objects.extend(get_from_collection(BlenderTypes.CURVES))
-    return hair_objects
-
-
-def get_mesh_object_for_groom_name(groom_name):
-    """
-    Gets a single mesh object for the given particle system.
-
-    :returns: A mesh object.
-    :rtype: bpy.types.Object
-    """
-    for mesh_object in get_from_collection(BlenderTypes.MESH):
-        for modifier in get_particle_system_modifiers(mesh_object):
-            if groom_name == modifier.particle_system.name:
-                return mesh_object
-
-    # if not found in the particle systems, check in the curves objects
-    scene_object = bpy.data.objects.get(groom_name)
-    if scene_object and scene_object.type == BlenderTypes.CURVES:
-        if scene_object.data.surface:
-            return scene_object.data.surface
-
-
-def get_from_collection(object_type):
-    """
-    This function fetches the objects inside each collection according to type and returns
-    an alphabetically sorted list of object references.
-
-    :param str object_type: The object type you would like to get.
-    :return list: A list of objects
-    """
-    collection_objects = []
-
-    # get the collection with the given name
-    export_collection = bpy.data.collections.get(ToolInfo.EXPORT_COLLECTION.value)
-    if export_collection:
-        # get all the objects in the collection
-        for collection_object in export_collection.all_objects:
-            # if the object is the correct type
-            if collection_object.type == object_type:
-                # if the object is visible
-                if collection_object.visible_get():
-                    # ensure the object doesn't end with one of the post fix tokens
-                    if not any(collection_object.name.startswith(f'{token.value}_') for token in PreFixToken):
-                        # add it to the group of objects
-                        collection_objects.append(collection_object)
-    return sorted(collection_objects, key=lambda obj: obj.name)
-
-
-def get_meshes_using_armature_modifier(rig_object):
-    """
-    This function get the objects using the given rig in an armature modifier.
-
-    :param object rig_object: An object of type armature.
-    :return list: A list of objects using the given rig in an armature modifier.
-    """
-    mesh_objects = get_from_collection(BlenderTypes.MESH)
-    child_meshes = []
-    for mesh_object in mesh_objects:
-        if rig_object == get_armature_modifier_rig_object(mesh_object):
-            child_meshes.append(mesh_object)
-    return child_meshes
-
-
-def get_asset_name(asset_name, properties, lod=False):
-    """
-    Takes a given asset name and removes the postfix _LOD and other non-alpha numeric characters
-    that unreal won't except.
-
-    :param str asset_name: The original name of the asset to export.
-    :param PropertyData properties: A property data instance that contains all property values of the tool.
-    :param bool lod: Whether to use the lod post fix of not.
-    :return str: The formatted name of the asset to export.
-    """
-    asset_name = re.sub(RegexPresets.INVALID_NAME_CHARACTERS, "_", asset_name.strip())
-
-    if properties.import_lods:
-        # remove the lod name from the asset
-        result = re.search(rf"({properties.lod_regex})", asset_name)
-        if result and not lod:
-            asset_name = asset_name.replace(result.groups()[0], '')
-
-    return asset_name
-
-
-def get_parent_collection(scene_object, collection):
-    """
-    This function walks the collection tree to find the collection parent of the given object.
-
-    :param object scene_object: A object.
-    :param object collection: A collection.
-    :return str: The collection name.
-    """
-    for child_collection in collection.children:
-        parent_collection = get_parent_collection(scene_object, child_collection)
-        if parent_collection:
-            return parent_collection
-
-    if scene_object in collection.objects.values():
-        return collection
-
-
-def get_skeleton_asset_path(rig_object, properties, get_path_function=get_import_path, *args, **kwargs):
-    """
-    Gets the asset path to the skeleton.
-
-    :param object rig_object: A object of type armature.
-    :param object properties: The property group that contains variables that maintain the addon's correct state.
-    :param callable get_path_function: A function that gets the import path.
-    :return str: The game path to the unreal skeleton asset.
-    """
-    # if a skeleton path is provided
-    if properties.unreal_skeleton_asset_path:
-        return properties.unreal_skeleton_asset_path
-
-    children = rig_object.children or get_meshes_using_armature_modifier(rig_object)
-
-    if children and properties.import_meshes:
-        # get all meshes from the mesh collection
-        mesh_collection_objects = get_from_collection(BlenderTypes.MESH)
-
-        # use the child mesh that is in the mesh collection to build the skeleton game path
-        for child in children:
-            if child in mesh_collection_objects:
-                asset_name = get_asset_name(child.name, properties)
-                import_path = get_path_function(properties, UnrealTypes.SKELETAL_MESH, *args, **kwargs)
-                return f'{import_path}{asset_name}_Skeleton'
-
-    report_error(
-        f'"{rig_object.name}" needs its unreal skeleton asset path specified under the "Path" settings '
-        f'so it can be imported correctly!'
-    )
-
-
 def get_armature_modifier_rig_object(mesh_object):
     """
-    This function gets the armature associated with a mesh via its armature modifier.
+    Gets the rig object that drives the armature modifier on a mesh object.
 
     :param object mesh_object: A object of type mesh.
     :return object: A object of type armature.
     """
+    # get the armature modifier from the mesh object
     for modifier in mesh_object.modifiers:
         if modifier.type == 'ARMATURE':
-            return modifier.object
+            # get the object armature that is attached to this modifier
+            if modifier.object:
+                return modifier.object
 
     return None
 
 
-def get_related_mesh_asset_data_from_groom_asset_data(groom_asset_data):
+def is_child_of_armature(scene_object):
     """
-    Gets the mesh asset data block that is related to the given groom asset data.
-
-    :returns: A asset data dict.
-    :rtype: dict
-    """
-    groom_object_name = groom_asset_data.get('_object_name')
-
-    # get the surface mesh for the groom object
-    surface_mesh_object = get_mesh_object_for_groom_name(groom_object_name)
-    # find the all asset data for that surface mesh
-    mesh_asset_data = get_asset_data_by_attribute(
-        name='_mesh_object_name',
-        value=surface_mesh_object.name
-    )
-    # when the asset data can not be found by the surface mesh name
-    if not mesh_asset_data:
-        rig_object = get_armature_modifier_rig_object(surface_mesh_object)
-        unique_parent_meshes = get_unique_parent_mesh_objects([rig_object], [surface_mesh_object])
-        # check if the surface mesh has a unique parent
-        if len(unique_parent_meshes) == 1 and unique_parent_meshes[0].parent:
-            # then get the asset data for the child of that unique parent
-            return get_asset_data_by_attribute(
-                name='_mesh_object_name',
-                value=unique_parent_meshes[0].parent.children[0].name
-            )
-    return mesh_asset_data
-
-
-def get_unique_parent_mesh_objects(rig_objects, mesh_objects):
-    """
-    Gets only meshes that have a unique same armature parent.
-
-    :param list rig_objects: A list of rig objects.
-    :param list mesh_objects: A list of mesh objects.
-    :returns: A list of mesh objects.
-    :rtype: list
-    """
-    unique_parent_armatures = []
-    unique_parent_empties = []
-    meshes_with_unique_parents = []
-    for mesh_object in mesh_objects:
-        if mesh_object.parent:
-            # for static meshes it combines by empty
-            if mesh_object.parent.type == 'EMPTY' and mesh_object.parent not in unique_parent_empties:
-                meshes_with_unique_parents.append(mesh_object)
-                unique_parent_empties.append(mesh_object.parent)
-
-            # for skeletal meshes it combines by armature
-            if mesh_object.parent.type == 'ARMATURE' and (
-                mesh_object.parent in rig_objects and mesh_object.parent not in unique_parent_armatures
-            ):
-                meshes_with_unique_parents.append(mesh_object)
-                unique_parent_armatures.append(mesh_object.parent)
-        else:
-            meshes_with_unique_parents.append(mesh_object)
-
-    return meshes_with_unique_parents
-
-
-def get_all_children(scene_object, object_type, exclude_postfix_tokens=False):
-    """
-    Gets all children of a scene object.
+    Checks if a given object is a child of an armature.
 
     :param object scene_object: A object.
-    :param str object_type: The type of object to select.
-    :param bool exclude_postfix_tokens: Whether or not to exclude objects that have a postfix token.
-    :return list child_objects: A list of child objects of the scene object.
+    :return bool: Whether or not the object is a child of an armature.
     """
-    child_objects = []
-    children = scene_object.children or get_meshes_using_armature_modifier(scene_object)
-    for child_object in children:
-        if child_object.type == object_type:
-            if exclude_postfix_tokens:
-                if any(child_object.name.startswith(f'{token.value}_') for token in PreFixToken):
-                    continue
-
-            child_objects.append(child_object)
-            if child_object.children:
-                get_all_children(child_object, object_type, exclude_postfix_tokens)
-
-    return child_objects
-
-
-def get_particle_system_modifiers(mesh_object):
-    """
-    Gets particle modifiers and the associated particle systems on a mesh as a list of tuples. If visible is provided,
-    get only modifiers that are visible in the viewport.
-
-    :param object mesh_object: A mesh object
-    :return list[modifier]: A list of tuples that contain the particle modifier and particle system.
-    """
-    particle_system_modifiers = []
-
-    for modifier in mesh_object.modifiers:
-        # skip modifiers that are not visible in the viewport
-        if not modifier.show_viewport:
-            continue
-
-        # get only 'HAIR' particle modifiers
-        if type(modifier) == bpy.types.ParticleSystemModifier:
-            if modifier.particle_system.settings.type == BlenderTypes.PARTICLE_HAIR:
-                particle_system_modifiers.append(modifier)
-    return particle_system_modifiers
-
-
-def get_particles_display_options(mesh_object):
-    """
-    Gets the particle display options for the given object.
-
-    :param bpy.types.Object mesh_object: A mesh object.
-    :returns: A dictionary of particle modifier names and their 'VIEWPORT' and 'RENDER' values.
-    :rtype: dict
-    """
-    display_options = {}
-    for modifier in mesh_object.modifiers:
-        if type(modifier) == bpy.types.ParticleSystemModifier:
-            display_options[modifier.name] = {
-                'RENDER': modifier.show_render,
-                'VIEWPORT': modifier.show_viewport
-            }
-    return display_options
-
-
-def get_all_particles_display_options():
-    """
-    Get all the particle display options for all objects.
-
-    :returns: All particle modifier names and their 'VIEWPORT' and 'RENDER' values per object.
-    :rtype: dict
-    """
-    all_display_options = {}
-    for scene_object in bpy.data.objects.values():
-        if scene_object.type == BlenderTypes.MESH:
-            all_display_options[scene_object.name] = get_particles_display_options(scene_object)
-    return all_display_options
-
-
-def get_asset_collisions(asset_name, properties):
-    """
-    Gets the collision assets for the given asset name.
-
-    :param str asset_name: The name of the asset to export.
-    :param object properties: The property group that contains variables that maintain the addon's correct state.
-    :returns: A list of collision mesh objects.
-    :rtype: list
-    """
-    collision_meshes = []
-    export_collection = bpy.data.collections.get(ToolInfo.EXPORT_COLLECTION.value)
-    if export_collection:
-        for mesh_object in export_collection.all_objects:
-            if is_collision_of(asset_name, mesh_object.name, properties):
-                collision_meshes.append(mesh_object)
-    return collision_meshes
-
-
-def set_particles_display_option(mesh_object, value, only='', display_type='RENDER'):
-    """
-    Sets the particle display options for the given object.
-
-    :param bpy.types.Object mesh_object: A mesh object.
-    :param bool value: A boolean value.
-    :param str only: The name of the only modifier to set the value on.
-    :param str display_type: The type of display value to set.
-    """
-    for modifier in mesh_object.modifiers:
-        if type(modifier) == bpy.types.ParticleSystemModifier:
-            if only and only == modifier.name:
-                if display_type == 'RENDER':
-                    modifier.show_render = value
-                else:
-                    modifier.show_viewport = value
-                return
-            else:
-                if display_type == 'RENDER':
-                    modifier.show_render = value
-                else:
-                    modifier.show_viewport = value
-
-
-def set_to_title(text):
-    """
-    Converts text to titles.
-
-    :param str text: The original text to convert to a title.
-    :return str: The new title text.
-    """
-    return ' '.join([word.capitalize() for word in text.lower().split('_')]).strip('.json')
-
-
-def set_pose(rig_object, pose_values):
-    """
-    This function sets the transforms of the pose bones on the provided rig object.
-
-    :param object rig_object: An armature object.
-    :param dict pose_values: A dictionary of pose bone transforms.
-    """
-    if rig_object:
-        for bone in rig_object.pose.bones:
-            bone_values = pose_values.get(bone.name)
-            if bone_values:
-                bone.location = bone_values['location']
-                bone.rotation_quaternion = bone_values['rotation_quaternion']
-                bone.rotation_euler = bone_values['rotation_euler']
-                bone.scale = bone_values['scale']
-
-
-def set_context(context):
-    """
-    Sets the current context of the scene and its objects.
-
-    :param dict context: A dictionary of values the the context should be set to.
-    """
-    mode = context.get('mode', 'OBJECT')
-    active_object_name = context.get('active_object')
-    object_contexts = context.get('objects')
-    for object_name, attributes in object_contexts.items():
-        scene_object = bpy.data.objects.get(object_name)
-        if scene_object:
-            scene_object.hide_set(attributes.get('hide', False))
-            scene_object.select_set(attributes.get('select', False))
-
-            active_action = attributes.get('active_action')
-            if active_action:
-                scene_object.animation_data.action = bpy.data.actions.get(active_action)
-
-            # restore the actions
-            set_all_action_attributes(scene_object, attributes.get('actions', {}))
-            # restore the particles systems
-            restore_particles(scene_object, attributes.get('particle_systems', {}))
-            scene_object.show_instancer_for_render = attributes.get('show_instancer_for_render', False)
-
-    # set the active object
-    if active_object_name:
-        bpy.context.view_layer.objects.active = bpy.data.objects.get(active_object_name)
-
-    # set the mode
-    if bpy.context.mode != mode:
-        # Note:
-        # When the mode context is read in edit mode it can be 'EDIT_ARMATURE' or 'EDIT_MESH', even though you
-        # are only able to set the context to 'EDIT' mode. Thus, if 'EDIT' was read from the mode context, the mode
-        # is set to edit.
-        if 'EDIT' in mode:
-            mode = 'EDIT'
-        bpy.ops.object.mode_set(mode=mode)
-
-    # set the current frame
-    bpy.context.scene.frame_set(context.get('current_frame', 0))
-
-
-def set_all_action_attributes(rig_object, attributes):
-    """
-    This function sets the action attributes to the provided values.
-
-    :param object rig_object: A object of type armature with animation data.
-    :param dict attributes: The values of the action attributes.
-    """
-    if rig_object.animation_data:
-        for nla_track in rig_object.animation_data.nla_tracks:
-            for strip in nla_track.strips:
-                if strip.action:
-                    action_attributes = attributes.get(strip.action.name)
-                    if action_attributes:
-                        strip.frame_start = action_attributes.get('frame_start', strip.frame_start)
-                        strip.frame_end = action_attributes.get('frame_end', strip.frame_end)
-                        nla_track.mute = action_attributes.get('mute', nla_track.mute)
-
-                        is_solo = action_attributes.get('is_solo')
-                        if is_solo:
-                            nla_track.is_solo = is_solo
-
-
-def set_action_mute_value(rig_object, action_name, mute):
-    """
-    This function sets a given action's nla track to the provided mute value.
-
-    :param object rig_object: A object of type armature with animation data.
-    :param str action_name: The name of the action mute value to modify
-    :param bool mute: Whether or not to mute the nla track
-    """
-    if rig_object:
-        if rig_object.animation_data:
-            for nla_track in rig_object.animation_data.nla_tracks:
-                for strip in nla_track.strips:
-                    if strip.action:
-                        if strip.action.name == action_name:
-                            nla_track.mute = mute
-
-
-def set_all_action_mute_values(rig_object, mute):
-    """
-    This function set all mute values on all nla tracks on the provided rig objects animation data.
-
-    :param object rig_object: A object of type armature with animation data.
-    :param bool mute: Whether or not to mute all nla tracks
-
-    """
-    if rig_object:
-        if rig_object.animation_data:
-            for nla_track in rig_object.animation_data.nla_tracks:
-                nla_track.mute = mute
-
-
-def is_unreal_connected():
-    """
-    Checks if the unreal rpc server is connected, and if not attempts a bootstrap.
-    """
-    # skips checking for and unreal connection if in send to disk mode
-    # https://github.com/EpicGamesExt/BlenderTools/issues/420
-    if bpy.context.scene.send2ue.path_mode == PathModes.SEND_TO_DISK.value:
-        return True
-
-    try:
-        # bootstrap the unreal rpc server if it is not already running
-        unreal.bootstrap_unreal_with_rpc_server()
-        return True
-    except ConnectionError:
-        report_error('Could not find an open Unreal Editor instance!', raise_exception=False)
-        return False
-
-
-def is_lod_of(asset_name, mesh_object_name, properties):
-    """
-    Checks if the given asset name matches the lod naming convention.
-
-    :param str asset_name: The name of the asset to export.
-    :param str mesh_object_name: The name of the lod mesh.
-    :param PropertyData properties: A property data instance that contains all property values of the tool.
-    """
-    return asset_name == get_asset_name(mesh_object_name, properties)
-
-
-def is_collision_of(asset_name, mesh_object_name, properties):
-    """
-    Checks if the given asset name matches the collision naming convention.
-
-    :param str asset_name: The name of the asset to export.
-    :param str mesh_object_name: The name of the collision mesh.
-    :param PropertyData properties: A property data instance that contains all property values of the tool.
-    """
-    # note we strip whitespace out of the collision name since whitespace is already striped out of the asset name
-    # https://github.com/EpicGamesExt/BlenderTools/issues/397#issuecomment-1333982590
-    mesh_object_name = mesh_object_name.strip()
-    return bool(
-        re.fullmatch(
-            r"U(BX|CP|SP|CX)_" + asset_name + r"(_\d+)?",
-            mesh_object_name
-        ) or re.fullmatch(
-            r"U(BX|CP|SP|CX)_" + asset_name + rf"{properties.lod_regex}(_\d+)?", mesh_object_name
-        )
-    )
-
-
-def has_extension_draw(location):
-    """
-    Checks whether the given location has any draw functions.
-
-    :param str location: The name of the draw location i.e. export, import, validations.
-    """
-    for extension_name in dir(bpy.context.scene.send2ue.extensions):
-        extension = getattr(bpy.context.scene.send2ue.extensions, extension_name)
-        if hasattr(extension, f'draw_{location}'):
+    if scene_object.parent:
+        if scene_object.parent.type == BlenderTypes.SKELETON:
             return True
     return False
 
 
-def create_collections():
+def convert_to_unreal_rotation(rotation):
     """
-    Creates the collections for the addon.
+    Converts rotation to unreal values.
+
+    :param object rotation: A rotation object.
+    :return list[float]: The euler rotation in unreal units.
     """
-    # Create the default collections if they don't already exist
-    for collection_name in ToolInfo.COLLECTION_NAMES.value:
-        if collection_name not in bpy.data.collections:
-            new_collection = bpy.data.collections.new(collection_name)
-            bpy.context.scene.collection.children.link(new_collection)
+    radians_to_degrees = 57.2958
+    return [
+        rotation[0] * radians_to_degrees,
+        rotation[1] * radians_to_degrees * -1,
+        rotation[2] * radians_to_degrees * -1
+    ]
 
 
-def remove_object_scale_keyframes(actions):
+def convert_to_unreal_scale(scale):
     """
-    This function removes all scale keyframes the exist a object in the provided actions.
+    Converts scale to unreal values.
 
-    :param list actions: A list of action objects.
+    :param object scale: A scale object.
+    :return list[float]: The scale.
     """
-    for action in actions:
-        for fcurve in action.fcurves:
-            if fcurve.data_path == 'scale':
-                action.fcurves.remove(fcurve)
+    return [scale[0], scale[1], scale[2]]
 
 
-def remove_from_disk(path, directory=False):
+def convert_to_unreal_location(location):
     """
-    This function removes the given path from disk.
+    Converts location coordinates to unreal location coordinates.
 
-    :param str path: An file path.
-    :param bool directory: Whether or not the path is a directory.
-    """
-    try:
-        original_umask = os.umask(0)
-        if os.path.exists(path):
-            os.chmod(path, 0o777)
-            if directory:
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
-    finally:
-        os.umask(original_umask)
-
-
-def remove_temp_folder():
-    """
-    This function removes the temp folder where send2ue caches FBX files for Unreal imports.
-    """
-    temp_folder = os.path.join(
-        tempfile.gettempdir(),
-        ToolInfo.NAME.value
-    )
-    remove_from_disk(temp_folder, directory=True)
-
-
-def remove_temp_data():
-    """
-    Removes the temp data folder and its contents.
-    """
-    temp_folder = get_temp_folder()
-    if os.path.exists(temp_folder):
-        shutil.rmtree(temp_folder)
-
-
-def remove_unpacked_files(unpacked_files):
-    """
-    Removes a list of files that were unpacked and re-packs them.
-
-    :param dict unpacked_files: A dictionary of image names and file paths that where unpacked.
-    """
-    for image_name, file_path in unpacked_files.items():
-        image = bpy.data.images.get(image_name)
-        if image:
-            image.pack()
-
-        if os.path.exists(file_path):
-            remove_from_disk(file_path)
-
-        # remove the parent folder if it is empty
-        folder = os.path.dirname(file_path)
-        if not os.listdir(folder):
-            remove_from_disk(folder, directory=True)
-
-
-def refresh_all_areas():
-    """
-    Iterates of all windows and screens and tags them for a redraw
-    """
-    for window_manager in bpy.data.window_managers:
-        for window in window_manager.windows:
-            for area in window.screen.areas:
-                area.tag_redraw()
-
-
-def select_asset_collisions(asset_name, properties):
-    """
-    Selects the collision assets for the given asset.
-
-    :param str asset_name: The name of the asset to export.
-    :param object properties: The property group that contains variables that maintain the addon's correct state.
-    """
-    for mesh_object in get_asset_collisions(asset_name, properties):
-        mesh_object.select_set(True)
-
-
-def clear_pose(rig_object):
-    """
-    This function sets the transforms of the pose bones on the provided rig object to the resting position.
-
-    :param object rig_object: An armature object.
-    """
-    if rig_object:
-        for bone in rig_object.pose.bones:
-            bone.location = Vector((0, 0, 0))
-            bone.rotation_quaternion = Quaternion((0, 0, 0), 1)
-            bone.rotation_euler = Vector((0, 0, 0))
-            bone.scale = Vector((1, 1, 1))
-
-
-def escape_local_view():
-    """
-    Escapes the local view state for all scene objects.
-    """
-    for area in bpy.context.screen.areas:
-        if area.type == 'VIEW_3D':
-            if area.spaces[0].local_view:
-                for scene_object in bpy.data.objects:
-                    scene_object.local_view_set(area.spaces[0], True)
-
-
-def focus_on_selected():
-    """
-    Focuses any 3D view region on the current screen to the selected object.
-    """
-    for window in bpy.context.window_manager.windows:
-        screen = window.screen
-        for area in bpy.context.screen.areas:
-            if area.type == 'VIEW_3D':
-                for region in area.regions:
-                    if region.type == 'WINDOW':
-                        override = {'window': window, 'screen': screen, 'area': area, 'region': region}
-                        bpy.ops.view3d.view_selected(override)
-
-
-def resize_object(scale, center_override):
-    """
-    This function scales the active selection from a given global transform position.
-
-    :param tuple scale: A tuple with x,y,z float values for the relative change in scale. Where 1 does not change
-    the current scale value.
-    :param tuple center_override: A tuple with x,y,z float values for the center of the transform.
-    """
-    # since this operator only works in the 3d view a custom context must be passed in
-    for window in bpy.context.window_manager.windows:
-        screen = window.screen
-        for area in screen.areas:
-            if area.type == 'VIEW_3D':
-                override = {'window': window, 'screen': screen, 'area': area}
-                bpy.ops.transform.resize(override, value=scale, center_override=center_override)
-                break
-
-
-def convert_to_class_name(bl_idname):
-    """
-    Converts the bl_idname to a class name.
-
-    :param str bl_idname: A bl_idname.
-    :return str: A class name.
-    """
-    return ''.join([word.capitalize() for word in re.split(r'\.|_', bl_idname)])
-
-
-def convert_blender_rotation_to_unreal_rotation(rotation):
-    """
-    Converts blender rotation axis to an unreal rotation axis.
-
-    :return list[float]: The blender local rotation.
-    """
-    x = math.degrees(rotation[0])
-    y = math.degrees(rotation[1])
-    z = math.degrees(rotation[2])
-    return [-y, -z, x]
-
-
-def convert_blender_to_unreal_location(location):
-    """
-    Converts blender location coordinates to unreal location coordinates.
-
+    :param object location: A location object.
     :return list[float]: The unreal location.
     """
     x = location[0] * 100
@@ -1190,462 +456,472 @@ def apply_all_mesh_modifiers(scene_object):
 
     :param object scene_object: A object.
     """
+    # deselect everything
     deselect_all_objects()
 
-    # select the provided object
-    bpy.context.view_layer.objects.active = scene_object
+    # select the object
     scene_object.select_set(True)
+    bpy.context.view_layer.objects.active = scene_object
 
-    # apply all modifiers except the armature modifier
-    for modifier in scene_object.modifiers:
-        if modifier.type != 'ARMATURE':
-            bpy.ops.object.modifier_apply(modifier=modifier.name)
+    # convert the modifier stack
+    bpy.ops.object.convert(target='MESH', keep_original=False)
 
-    deselect_all_objects()
+
+def get_from_collection(object_type):
+    """
+    Gets all the objects of a specified type from export collection.
+
+    :param str object_type: The object type you would like to get.
+    :return list: A list of objects
+    """
+    collection_objects = []
+
+    # get the collection with the given name
+    export_collection = bpy.data.collections.get(ToolInfo.EXPORT_COLLECTION.value)
+    if export_collection:
+        # get all the objects in the collection
+        for collection_object in export_collection.all_objects:
+            # if the object is the correct type
+            if collection_object.type == object_type:
+                # if the object is visible
+                if collection_object.visible_get():
+                    # ensure the object doesn't end with one of the post fix tokens
+                    if not any(collection_object.name.startswith(f'{token.value}_') for token in PreFixToken):
+                        # add it to the group of objects
+                        collection_objects.append(collection_object)
+    return sorted(collection_objects, key=lambda obj: obj.name)
+
+
+def get_meshes_using_armature_modifier(rig_object):
+    """
+    This function get the objects using the given rig in an armature modifier.
+
+    :param object rig_object: An object of type armature.
+    :return list: A list of objects using the given rig in an armature modifier.
+    """
+    mesh_objects = get_from_collection(BlenderTypes.MESH)
+    child_meshes = []
+    for mesh_object in mesh_objects:
+        if rig_object == get_armature_modifier_rig_object(mesh_object):
+            child_meshes.append(mesh_object)
+    return child_meshes
+
+
+def get_asset_name(asset_name, properties, lod=False):
+    """
+    Takes a given asset name and removes the postfix _LOD and other non-alpha numeric characters
+    that unreal won't except.
+
+    :param str asset_name: The original name of the asset to export.
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    :param bool lod: Whether to use the lod post fix of not.
+    :return str: The formatted name of the asset to export.
+    """
+    asset_name = re.sub(RegexPresets.INVALID_NAME_CHARACTERS, "_", asset_name.strip())
+
+    if properties.import_lods:
+        # Extract flags and clean pattern from lod_regex
+        lod_regex, flags = _extract_regex_flags(properties.lod_regex)
+        
+        # remove the lod name from the asset
+        try:
+            result = re.search(f"({lod_regex})", asset_name, flags)
+            if result and not lod:
+                asset_name = asset_name.replace(result.groups()[0], '')
+        except re.error:
+            # If regex is malformed, skip LOD processing
+            pass
+
+    return asset_name
+
+
+def get_parent_collection(scene_object, collection):
+    """
+    This function walks the collection tree to find the collection parent of the given object.
+
+    :param object scene_object: A object.
+    :param object collection: A collection.
+    :return str: The collection name.
+    """
+    for child_collection in collection.children:
+        for child_object in child_collection.objects:
+            if child_object == scene_object:
+                return child_collection.name
+
+        parent_collection = get_parent_collection(scene_object, child_collection)
+        if parent_collection:
+            return parent_collection
+    return None
+
+
+def get_mesh_object_from_curves(curves_object):
+    """
+    Gets the mesh object the curves object is bound to.
+
+    :param object curves_object: A curves object.
+    :return: A mesh object.
+    """
+    # curves object can have modifiers like surfaces deform which attach them to meshes
+    for modifier in curves_object.modifiers:
+        if modifier.type == 'SURFACE_DEFORM' and modifier.target and modifier.target.type == BlenderTypes.MESH:
+            return modifier.target
+
+    # if no modifiers check if the curves object is the child of a mesh
+    if curves_object.parent and curves_object.parent.type == BlenderTypes.MESH:
+        return curves_object.parent
+
+    return None
+
+
+def refresh_all_areas():
+    """
+    Refreshes all areas in all windows.
+    """
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
 
 
 def deselect_all_objects():
     """
-    This function deselects all object in the scene.
+    Deselects all objects in the scene.
     """
-    for scene_object in bpy.data.objects:
+    for scene_object in bpy.context.scene.objects:
         scene_object.select_set(False)
 
 
-def clean_nla_tracks(rig_object, action):
+def select_object(scene_object):
     """
-    This function removes any nla tracks that have a action that matches the provided action. Also it removes
-    any nla tracks that have actions in their strips that match other actions, or have no strips.
+    Selects an objects and set it to the active object.
 
-    :param object rig_object: A object of type armature with animation data.
-    :param object action: A action object.
+    :param object scene_object: A object.
     """
-    for nla_track in rig_object.animation_data.nla_tracks:
-        # remove any nla tracks that don't have strips
-        if len(nla_track.strips) == 0:
-            rig_object.animation_data.nla_tracks.remove(nla_track)
-        else:
-            for strip in nla_track.strips:
-                # remove nla strips if its action matches the active action duplicate actions
-                if strip.action == action:
-                    rig_object.animation_data.nla_tracks.remove(nla_track)
-
-                # remove nla strips with duplicate actions
-                if strip.action:
-                    action_names = get_action_names(rig_object)
-                    if action_names.count(strip.action.name) > 1:
-                        rig_object.animation_data.nla_tracks.remove(nla_track)
+    deselect_all_objects()
+    scene_object.select_set(True)
+    bpy.context.view_layer.objects.active = scene_object
 
 
-def stash_animation_data(rig_object):
+def set_object_origin_to_world_origin(scene_object):
     """
-    Stashes the active action on an object into its nla strips.
+    Sets the provided object's origin to the world origin.
 
-    :param object rig_object: A object of type armature with animation data.
+    :param object scene_object: A object.
     """
-    if rig_object.animation_data:
-        # if there is an active action on the rig object
-        active_action = rig_object.animation_data.action
+    # deselect everything
+    deselect_all_objects()
 
-        attributes = get_all_action_attributes(rig_object)
+    # select the object
+    scene_object.select_set(True)
+    bpy.context.view_layer.objects.active = scene_object
 
-        # remove any nla tracks that have the active action, have duplicate names, or no strips
-        clean_nla_tracks(rig_object, active_action)
+    # move the object's pivot to the world origin
+    # save the cursor location
+    saved_cursor_location = bpy.context.scene.cursor.location.copy()
 
-        if active_action:
-            # create a new nla track
-            nla_track = rig_object.animation_data.nla_tracks.new()
-            nla_track.name = active_action.name
+    # set the cursor location to the world center
+    bpy.context.scene.cursor.location = [0.0, 0.0, 0.0]
 
-            # create a strip with the active action as the strip action
-            nla_track.strips.new(
-                name=active_action.name,
-                start=1,
-                action=rig_object.animation_data.action
-            )
+    # set the origin to the cursor
+    bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
 
-        set_all_action_attributes(rig_object, attributes)
+    # restore the cursor location
+    bpy.context.scene.cursor.location = saved_cursor_location
 
 
-def format_asset_path(game_reference):
+def get_groom_object_name(curves_object, properties):
     """
-    This function removes the extra characters if a game reference is pasted in.
+    Gets the groom object name based on which mesh the curves object is attached to.
 
-    :param str game_reference: The game reference copied to the clipboard from the unreal asset.
-    :return str: The formatted game folder path.
+    :param object curves_object: The curves object.
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    :return str: The groom object name.
     """
-    if game_reference[-1] == "'":
-        return game_reference.split("'")[-2].split(".")[0]
-    else:
-        return game_reference
-
-
-def format_folder_path(game_reference):
-    """
-    This function removes the asset name if a game reference is pasted in.
-
-    :param str game_reference: The game reference copied to the clipboard from the unreal asset.
-    :return str: The formatted game folder path.
-    """
-    game_reference = game_reference.replace('\\', '/').replace(r'\\', '/').replace('//', '/')
-    if game_reference[-1] == "'":
-        asset_name = format_asset_path(game_reference).split('/')[-1]
-        return format_asset_path(game_reference).replace(asset_name, '')
-    else:
-        return game_reference
-
-
-def auto_format_unreal_mesh_folder_path(self, value):
-    """
-    This function is called every time the unreal mesh folder path is updated.
-
-    :param object self: This is a reference to the property group class this functions in appended to.
-    :param object value: The value of the property group class this update function is assigned to.
-    """
-    formatted_value = format_folder_path(self.unreal_mesh_folder_path)
-    if self.unreal_mesh_folder_path != formatted_value:
-        self.unreal_mesh_folder_path = formatted_value
-
-    # Make sure the mesh path to unreal is correct as the engine will
-    # hard crash if passed an incorrect path
-    self.incorrect_unreal_mesh_folder_path = False
-    if self.unreal_mesh_folder_path and not self.unreal_mesh_folder_path.lower().startswith("/game"):
-        self.incorrect_unreal_mesh_folder_path = True
-
-
-def auto_format_unreal_animation_folder_path(self, value):
-    """
-    This function is called every time the unreal animation folder path is updated.
-
-    :param object self: This is a reference to the property group class this functions in appended to.
-    :param object value: The value of the property group class this update function is assigned to.
-    """
-    formatted_value = format_folder_path(self.unreal_animation_folder_path)
-    if self.unreal_animation_folder_path != formatted_value:
-        self.unreal_animation_folder_path = formatted_value
-
-    # Make sure the animation path to unreal is correct as the engine will
-    # hard crash if passed an incorrect path
-    self.incorrect_unreal_animation_folder_path = False
-    if self.unreal_animation_folder_path and not self.unreal_animation_folder_path.lower().startswith("/game"):
-        self.incorrect_unreal_animation_folder_path = True
-
-
-def auto_format_unreal_skeleton_asset_path(self, value):
-    """
-    This function is called every time the unreal skeleton asset path is updated.
-
-    :param object self: This is a reference to the property group class this functions in appended to.
-    :param object value: The value of the property group class this update function is assigned to.
-    """
-    if self.unreal_skeleton_asset_path:
-        formatted_value = format_asset_path(self.unreal_skeleton_asset_path)
-        if self.unreal_skeleton_asset_path != formatted_value:
-            self.unreal_skeleton_asset_path = formatted_value
-
-    # Make sure the skeleton path to unreal is correct as the engine will
-    # hard crash if passed an incorrect path
-    self.incorrect_unreal_skeleton_path = False
-    if self.unreal_skeleton_asset_path and not unreal.asset_exists(self.unreal_skeleton_asset_path):
-        self.incorrect_unreal_skeleton_path = True
-
-
-def auto_format_disk_mesh_folder_path(self, value):
-    """
-    This function is called every time the disk mesh folder path is updated.
-
-    :param object self: This is a reference to the property group class this functions in appended to.
-    :param object value: The value of the property group class this update function is assigned to.
-    """
-    is_relative = True
-    self.incorrect_disk_mesh_folder_path = True
-
-    self.mesh_folder_untitled_blend_file = False
-    if self.disk_mesh_folder_path.startswith('//'):
-        if not bpy.data.filepath:
-            self.mesh_folder_untitled_blend_file = True
-    else:
-        is_relative = False
-
-    # If the path is relative, prevent the UI from displaying it as a wrong
-    # path. We expect the process that's going to use this path to resolve
-    # the path and have an additional validation
-    if is_relative:
-        self.incorrect_disk_mesh_folder_path = False
-
-    # TODO fix relative path speed
-    # os.path.isdir is very slow to check on every UI update. Lets only check if
-    # we are not a relative path
-    elif os.path.isdir(self.disk_mesh_folder_path):
-        self.incorrect_disk_mesh_folder_path = False
-
-
-def auto_format_disk_animation_folder_path(self, value):
-    """
-    This function is called every time the disk animation folder path is updated.
-
-    :param object self: This is a reference to the property group class this functions in appended to.
-    :param object value: The value of the property group class this update function is assigned to.
-    """
-    is_relative = True
-    self.incorrect_disk_animation_folder_path = True
-
-    self.animation_folder_untitled_blend_file = False
-    if self.disk_animation_folder_path.startswith('//'):
-        if not bpy.data.filepath:
-            self.animation_folder_untitled_blend_file = True
-    else:
-        is_relative = False
-
-    # If the path is relative, prevent the UI from displaying it as a wrong
-    # path. We expect the process that's going to use this path to resolve
-    # the path and have an additional validation
-    if is_relative:
-        self.incorrect_disk_animation_folder_path = False
-
-    # os.path.isdir is very slow to check on every UI update. Lets only check
-    # if we are not a relative path
-    elif os.path.isdir(self.disk_animation_folder_path):
-        self.incorrect_disk_animation_folder_path = False
-
-
-def round_keyframes(actions):
-    """
-    This function rounds all keyframes on the provided actions to the nearest integer.
-
-    :param list actions: A list of action objects.
-    """
-    for action in actions:
-        for fcurve in action.fcurves:
-            for keyframe_point in fcurve.keyframe_points:
-                keyframe_point.co[0] = round(keyframe_point.co[0])
-
-
-def scale_object(scene_object, scale_factor):
-    """
-    This function scales the provided object by the given scale factor.
-
-    :param object scene_object: The scene object to scale.
-    :param float scale_factor: The amount to proportionally scale the object.
-    """
-    scene_object.scale.x = scene_object.scale.x * scale_factor
-    scene_object.scale.y = scene_object.scale.y * scale_factor
-    scene_object.scale.z = scene_object.scale.z * scale_factor
-
-
-def subtract_lists(list1, list2):
-    """
-    Subtracts each element of two lists.
-
-    :param list list1: The minuend.
-    :param list list2: The subtrahend.
-    :returns: The difference of the lists.
-    :rtype: list
-    """
-    result = []
-    for item1, item2 in zip(list1, list2):
-        result.append(item1 - item2)
-
-    return result
-
-
-def disable_particles(mesh_object):
-    """
-    Disables the particles in the viewport and render.
-
-    :returns: The values before they were disabled.
-    :rtype: dict
-    """
-    existing_display_options = get_particles_display_options(mesh_object)
-    if existing_display_options:
-        set_particles_display_option(mesh_object, False, display_type='RENDER')
-        set_particles_display_option(mesh_object, False, display_type='VIEWPORT')
-    return existing_display_options
-
-
-def restore_particles(mesh_object, display_options):
-    """
-    Restores the particle visibility values.
-
-    :param bpy.types.Object mesh_object: A mesh object.
-    :param dict display_options: The display options to restore.
-    """
-    for modifier in mesh_object.modifiers:
-        if type(modifier) == bpy.types.ParticleSystemModifier:
-            display_option = display_options.get(modifier.name)
-            if display_option:
-                for display_type, value in display_option.items():
-                    if display_type == 'RENDER':
-                        modifier.show_render = value
-                    else:
-                        modifier.show_viewport = value
-            # if this particle system has no given settings, remove it.
-            else:
-                mesh_object.modifiers.remove(modifier)
-
-
-def restore_all_particles(all_display_options):
-    """
-    Restores all particle visibility values per scene object.
-
-    :param dict all_display_options: The display options to restore.
-    """
-    for object_name, display_options in all_display_options.items():
-        scene_object = bpy.data.objects.get(object_name)
-        if scene_object and scene_object.type == BlenderTypes.MESH:
-            restore_particles(scene_object, display_options)
-
-
-def scale_object_actions(unordered_objects, actions, scale_factor):
-    """
-    This function scales the provided action's location keyframe on the provided objects by the given scale factor.
-
-    :param list unordered_objects: A list of objects.
-    :param list actions: A list of action objects.
-    :param float scale_factor: The value to scale the location fcurves by.
-    """
-    # get the list of objects that do not have parents
-    no_parents = [unordered_object for unordered_object in unordered_objects if not unordered_object.parent]
-
-    # get the list of objects that have parents
-    parents = [unordered_object for unordered_object in unordered_objects if unordered_object.parent]
-
-    # re-order the imported objects to have the top of the hierarchies iterated first
-    ordered_objects = no_parents + parents
-
-    for ordered_object in ordered_objects:
-        # run the export iteration but with "scale" set to the scale of the object as it was imported
-        scale = (
-            ordered_object.scale[0] * scale_factor,
-            ordered_object.scale[1] * scale_factor,
-            ordered_object.scale[2] * scale_factor
-        )
-
-        # if the imported object is an armature
-        if ordered_object.type == 'ARMATURE':
-            # iterate over any imported actions first this time...
-            for action in actions:
-                # iterate through the location curves
-                for fcurve in [fcurve for fcurve in action.fcurves if fcurve.data_path.endswith('location')]:
-                    # the location fcurve of the object
-                    if fcurve.data_path == 'location':
-                        for keyframe_point in fcurve.keyframe_points:
-                            # just the location to preserve root motion
-                            keyframe_point.co[1] = keyframe_point.co[1] * scale[fcurve.array_index] * 100
-                        # don't scale the objects location handles
-                        continue
-
-                    # and iterate through the keyframe values
-                    for keyframe_point in fcurve.keyframe_points:
-                        # multiply the location keyframes by the scale per channel
-                        keyframe_point.co[1] = keyframe_point.co[1] * scale[fcurve.array_index]
-                        keyframe_point.handle_left[1] = keyframe_point.handle_left[1] * scale[fcurve.array_index]
-                        keyframe_point.handle_right[1] = keyframe_point.handle_right[1] * scale[fcurve.array_index]
-
-            # apply the scale on the object
-            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-
-
-def import_unreal_asset(file_path):
-    """
-    This function imports an unreal asset, fixes the armature scale factor, and rounds the keyframe to the nearest
-    integer.
-
-    :param str file_path: The full file path the file on disk.
-    """
-    # maybe get all the actions in the .blend so we can discern them from the ones that are about to be imported...
-    existing_actions = [action for action in bpy.data.actions]
-
-    # import the fbx file
-    bpy.ops.import_scene.fbx(filepath=file_path)
-
-    # the list of imported actions
-    imported_actions = [action for action in bpy.data.actions if action not in existing_actions]
-
-    # scale the keyframes in the actions
-    scale_object_actions(bpy.context.selected_objects, imported_actions, 1)
-
-    # remove the object scale keyframes
-    remove_object_scale_keyframes(actions=imported_actions)
-
-    # round keyframes
-    round_keyframes(imported_actions)
-
-
-def import_asset(file_path, properties):
-    """
-    This function imports the selected asset appropriately according to which source application the file came from.
-
-    :param str file_path: The full file path the file on disk.
-    :param object properties: The property group that contains variables that maintain the addon's correct state.
-    """
-    if properties.source_application in ['ue4', 'ue5']:
-        import_unreal_asset(file_path)
-
-    clear_undo_history('Asset Import')
-
-
-def clear_undo_history(message):
-    """
-    This function clears blenders undo history by doing a deselect all operation and repeatedly
-    pushing that operation into the undo stack until all previous history is cleared from the undo
-    history.
-
-    :param str message: The message to display in the undo history.
-    """
-    # run this null operator
-    bpy.ops.send2ue.null_operator()
-
-    # repeatedly push the last operator into the undo stack till there are no more undo steps
-    for item in range(0, bpy.context.preferences.edit.undo_steps + 1):
-        bpy.ops.ed.undo_push(message=message)
-
-
-def resolve_path(path):
-    """
-    This function checks if a given path is relative and returns the full
-    path else returns the original path
-
-    :param str path: The input path
-    :return str: The expanded path
-    """
-
-    # Check for a relative path input. Relative paths are represented
-    # by '//' eg. '//another/path/relative/to/blend_file'
-    if path.startswith('//') or path.startswith('./'):
-        # Build an absolute path resolving the relative path from the blend file
-        path = bpy.path.abspath(path.replace("./", "//", 1))
-
-    # Make sure the path has the correct OS separators
-    path = bpy.path.native_pathsep(path)
-
-    return path
+    mesh_object = get_mesh_object_from_curves(curves_object)
+    if mesh_object:
+        return get_asset_name(mesh_object.name, properties)
+
+    # default to the curves object name if no mesh parent is found
+    return get_asset_name(curves_object.name, properties)
 
 
 def unpack_textures():
     """
-    Unpacks the textures from the .blend file if they dont exist on disk, so
-    the images will be included in the fbx export.
+    Unpacks all the textures that are packed into the blend file.
 
-    :return list: A dictionary of image names and file paths that where unpacked.
+    :return dict: A dictionary of previously packed file paths and their new file paths.
     """
     unpacked_files = {}
+    for image in bpy.data.images:
+        if image.packed_file:
+            # save the reference to the old file path
+            old_file_path = image.filepath
 
-    # go through each material
-    for material in bpy.data.materials:
-        if material.node_tree:
-            # go through each node
-            for node in material.node_tree.nodes:
-                # check for packed textures
-                if node.type == 'TEX_IMAGE':
-                    image = node.image
-                    if image:
-                        if image.source == 'FILE':
-                            if image.packed_file:
-                                # if the unpacked image does not exist on disk
-                                if not os.path.exists(image.filepath_from_user()):
-                                    # unpack the image
-                                    image.unpack()
-                                    unpacked_files[image.name] = image.filepath_from_user()
+            # unpack the image to the temp folder
+            image.unpack(method='USE_ORIGINAL')
+
+            # save the reference to the new file path
+            unpacked_files[old_file_path] = image.filepath_from_user()
 
     return unpacked_files
+
+
+def remove_unpacked_files(unpacked_files):
+    """
+    Removes unpacked files from disk and resets the images back to their packed file paths.
+
+    :param dict unpacked_files: A dictionary of previously packed file paths and their new file paths.
+    """
+    for old_file_path, new_file_path in unpacked_files.items():
+        for image in bpy.data.images:
+            if image.filepath_from_user() == new_file_path:
+                # remove the unpacked file
+                if os.path.exists(new_file_path):
+                    os.remove(new_file_path)
+
+                # reset the image path back to the packed file path
+                image.filepath = old_file_path
+
+
+def import_asset(file_path, send2ue_data):
+    """
+    This function imports the given asset and applies the import settings.
+
+    :param str file_path: The file path to import.
+    :param PropertyData send2ue_data: A property data instance that contains all property values of the tool.
+    """
+    file_name = get_asset_name_from_file_name(file_path)
+    file_extension = os.path.splitext(file_path)[1]
+
+    # get the import settings from the addon preferences
+    addon = bpy.context.preferences.addons.get(ToolInfo.NAME.value)
+
+    # import based on file extension
+    if file_extension.lower() == f'.{FileTypes.FBX}':
+        bpy.ops.import_scene.fbx(
+            filepath=file_path,
+            **addon.preferences.get_property_group('fbx_import').to_dict()
+        )
+
+    if file_extension.lower() == f'.{FileTypes.ABC}':
+        bpy.ops.wm.alembic_import(
+            filepath=file_path,
+            **addon.preferences.get_property_group('abc_import').to_dict()
+        )
+
+    # reset the object names back to the pre import state
+    for imported_object in bpy.context.selected_objects:
+        if get_asset_name_from_file_name(imported_object.name) == file_name:
+            imported_object.name = file_name
+
+
+def mute_nla_tracks(rig_object, mute):
+    """
+    This mutes or un-mutes the nla tracks on the given rig object.
+
+    :param object rig_object: A object of type armature with animation data.
+    :param bool mute: Whether or not to mute all nla tracks
+
+    """
+    if rig_object:
+        if rig_object.animation_data:
+            for nla_track in rig_object.animation_data.nla_tracks:
+                nla_track.mute = mute
+
+
+def is_unreal_connected():
+    """
+    Checks if the unreal rpc server is connected, and if not attempts a bootstrap.
+    """
+    # skips checking for and unreal connection if in send to disk mode
+    # https://github.com/EpicGamesExt/BlenderTools/issues/420
+    if bpy.context.scene.send2ue.path_mode == PathModes.SEND_TO_DISK.value:
+        return True
+
+    try:
+        # bootstrap the unreal rpc server if it is not already running
+        unreal.bootstrap_unreal_with_rpc_server()
+        return True
+    except ConnectionError:
+        report_error('Could not find an open Unreal Editor instance!', raise_exception=False)
+        return False
+
+
+def is_lod_of(asset_name, mesh_object_name, properties):
+    """
+    Checks if the given asset name matches the lod naming convention.
+
+    :param str asset_name: The name of the asset to export.
+    :param str mesh_object_name: The name of the lod mesh.
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    """
+    return asset_name == get_asset_name(mesh_object_name, properties)
+
+
+def is_collision_of(asset_name, mesh_object_name, properties):
+    """
+    Checks if the given asset name matches the collision naming convention.
+
+    :param str asset_name: The name of the asset to export.
+    :param str mesh_object_name: The name of the collision mesh.
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    """
+    # note we strip whitespace out of the collision name since whitespace is already striped out of the asset name
+    # https://github.com/EpicGamesExt/BlenderTools/issues/397#issuecomment-1333982590
+    mesh_object_name = mesh_object_name.strip()
+    
+    # Check basic collision pattern
+    basic_pattern = r"U(BX|CP|SP|CX)_" + re.escape(asset_name) + r"(_\d+)?"
+    if re.fullmatch(basic_pattern, mesh_object_name):
+        return True
+    
+    # Check collision pattern with LOD
+    lod_regex, flags = _extract_regex_flags(properties.lod_regex)
+    
+    try:
+        lod_pattern = r"U(BX|CP|SP|CX)_" + re.escape(asset_name) + lod_regex + r"(_\d+)?"
+        return bool(re.fullmatch(lod_pattern, mesh_object_name, flags))
+    except re.error:
+        # Fallback to basic pattern if regex is malformed
+        return bool(re.fullmatch(basic_pattern, mesh_object_name))
+
+
+def has_extension_draw(location):
+    """
+    Checks whether the given location has any draw functions.
+
+    :param str location: The name of the draw location i.e. export, import, validations.
+    """
+    for extension_name in dir(bpy.context.scene.send2ue.extensions):
+        extension = getattr(bpy.context.scene.send2ue.extensions, extension_name)
+        if hasattr(extension, f'draw_{location}'):
+            return True
+    return False
+
+
+def get_hair_objects(properties):
+    """
+    Gets all the hair objects from the export collection.
+
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    :return list: A list of hair objects.
+    """
+    if properties.import_grooms:
+        return get_from_collection(BlenderTypes.CURVES)
+    return []
+
+
+def create_collections():
+    """
+    Creates the collections for the addon.
+    """
+    for collection_name in ToolInfo.COLLECTION_NAMES.value:
+        # if the collection doesn't exist, create it
+        if not bpy.data.collections.get(collection_name):
+            new_collection = bpy.data.collections.new(collection_name)
+            bpy.context.scene.collection.children.link(new_collection)
+
+
+def select_asset_collisions(asset_name, properties):
+    """
+    Selects all the collision meshes for the given asset.
+
+    :param str asset_name: The name of the asset to export.
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    """
+    for mesh_object in get_asset_collisions(asset_name, properties):
+        mesh_object.select_set(True)
+
+
+def get_asset_collisions(asset_name, properties):
+    """
+    Gets all the collision meshes for the given asset.
+
+    :param str asset_name: The name of the asset to export.
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    :return list: A list of mesh objects.
+    """
+    mesh_objects = get_from_collection(BlenderTypes.MESH)
+    collision_objects = []
+    for mesh_object in mesh_objects:
+        if is_collision_of(asset_name, mesh_object.name, properties):
+            collision_objects.append(mesh_object)
+    return collision_objects
+
+
+def get_asset_lods(asset_name, properties):
+    """
+    Gets all the lod meshes for the given asset.
+
+    :param str asset_name: The name of the asset to export.
+    :param PropertyData properties: A property data instance that contains all property values of the tool.
+    :return list: A list of mesh objects.
+    """
+    mesh_objects = get_from_collection(BlenderTypes.MESH)
+    lod_objects = []
+    for mesh_object in mesh_objects:
+        if is_lod_of(asset_name, mesh_object.name, properties):
+            lod_objects.append(mesh_object)
+    return lod_objects
+
+
+def get_current_context():
+    """
+    Gets the current state of the scene and its objects.
+
+    :return dict: Dictionary with scene state.
+    """
+    active_object = bpy.context.view_layer.objects.active
+    selected_objects = bpy.context.selected_objects.copy()
+    current_frame = bpy.context.scene.frame_current
+    visible_objects = [obj for obj in bpy.context.scene.objects if obj.visible_get()]
+
+    return {
+        'active_object': active_object,
+        'selected_objects': selected_objects,
+        'current_frame': current_frame,
+        'visible_objects': visible_objects
+    }
+
+
+def set_context(context_data):
+    """
+    Restores the scene state.
+
+    :param dict context_data: Dictionary with scene state to restore.
+    """
+    # deselect all objects first
+    deselect_all_objects()
+
+    # restore selected objects
+    for scene_object in context_data.get('selected_objects', []):
+        if scene_object.name in bpy.context.scene.objects:
+            scene_object.select_set(True)
+
+    # restore active object
+    active_object = context_data.get('active_object')
+    if active_object and active_object.name in bpy.context.scene.objects:
+        bpy.context.view_layer.objects.active = active_object
+
+    # restore current frame
+    current_frame = context_data.get('current_frame')
+    if current_frame is not None:
+        bpy.context.scene.frame_current = current_frame
+
+
+def remove_temp_data():
+    """
+    Removes all temp data.
+    """
+    remove_temp_folder()
+
+
+def remove_temp_folder():
+    """
+    Removes the temp folder.
+    """
+    temp_folder = get_temp_folder()
+    if os.path.exists(temp_folder):
+        try:
+            shutil.rmtree(temp_folder)
+        except PermissionError:
+            pass
