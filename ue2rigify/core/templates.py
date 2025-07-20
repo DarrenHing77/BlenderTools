@@ -146,7 +146,7 @@ def get_metarig_data(properties):
         utilities.operator_on_object_in_mode(
             lambda: bpy.ops.armature.rigify_encode_metarig(),
             metarig_object,
-            'EDIT'
+            'OBJECT'
         )
         metarig_text_object = bpy.data.texts.get(os.path.basename(properties.saved_metarig_data))
 
