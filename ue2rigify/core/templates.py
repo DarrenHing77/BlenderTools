@@ -133,27 +133,41 @@ def get_constraints_data(rig_object):
 
     return constraints_data
 
-
 def get_metarig_data(properties):
     """
-    This function encodes the metarig object to a python string.
+    Gets the rigify meta rig data from the given meta rig object.
+    Fixed for Blender 4.5 context issues.
 
     :param object properties: The property group that contains variables that maintain the addon's correct state.
-    :return object: A blender text object.
+    :return str: The stringified meta rig data.
     """
-    metarig_object = bpy.data.objects.get(Rigify.META_RIG_NAME)
-    if metarig_object:
-        utilities.operator_on_object_in_mode(
-            lambda: bpy.ops.armature.rigify_encode_metarig(),
-            metarig_object,
-            'EDIT'
-        )
-        metarig_text_object = bpy.data.texts.get(os.path.basename(properties.saved_metarig_data))
-
-        if metarig_text_object:
-            return metarig_text_object.as_string()
-
-    return None
+    metarig_object = get_metarig_object(properties)
+    
+    def safe_rigify_encode():
+        """Wrapper for rigify encode with proper context and error handling"""
+        if not bpy.context.object or bpy.context.object.type != 'ARMATURE':
+            print("Error: No armature selected for rigify encode")
+            return
+            
+        # Ensure we're in Edit mode for armature operations
+        if bpy.context.object.mode != 'EDIT':
+            bpy.ops.object.mode_set(mode='EDIT')
+        
+        # Check if operator is available
+        if bpy.ops.armature.rigify_encode_metarig.poll():
+            bpy.ops.armature.rigify_encode_metarig()
+        else:
+            print("Warning: Rigify encode metarig operator not available in current context")
+    
+    utilities.operator_on_object_in_mode(
+        safe_rigify_encode,
+        metarig_object,
+        'EDIT',
+        True,
+        True
+    )
+    
+    return metarig_object.data.rigify_metarig_addon_data.metarig_data
 
 
 def get_starter_metarig_templates(self=None, context=None):

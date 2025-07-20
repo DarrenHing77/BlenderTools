@@ -550,43 +550,50 @@ def initialize_template_paths(self=None, context=None):
     templates.set_template_files(properties)
 
 
-def operator_on_object_in_mode(operator, operated_on_object, mode):
+def operator_on_object_in_mode(operator, object_ref, mode, deselect_all=True, select_object=True):
     """
-    Wraps operators by getting the current context, doing the operation on an object in a mode,
-    then restores the context back to its previous state.
-
-    :param lambda operator: A blender operator function reference.
-    :param object operated_on_object: The blender object that to preform the operation on.
-    :param str mode: The mode to to preform the action in.
+    Fixed for Blender 4.5 - uses temp_override instead of context passing
     """
-    # get the current context
-    current_mode = bpy.context.mode.split('_')[0]
-
-    current_active_object = bpy.context.view_layer.objects.active
-    operated_on_object_hidden = operated_on_object.hide_get()
-    operated_on_object_selected = operated_on_object.select_get()
-    current_frame = bpy.context.scene.frame_current
-
-    # set the context to selected in the right mode
-    if bpy.context.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-    bpy.ops.object.select_all(action='DESELECT')
-    operated_on_object.hide_set(False)
-    operated_on_object.select_set(True)
-    bpy.context.view_layer.objects.active = operated_on_object
-    bpy.ops.object.mode_set(mode=mode)
-
-    # run the operator
-    operator()
-
-    # restore the previous context
-    bpy.ops.object.mode_set(mode=current_mode)
-    operated_on_object.hide_set(operated_on_object_hidden)
-    operated_on_object.select_set(operated_on_object_selected)
-
-    bpy.context.view_layer.objects.active = current_active_object
-    bpy.context.scene.frame_current = current_frame
+    previous_active = bpy.context.view_layer.objects.active
+    previous_mode = bpy.context.object.mode if bpy.context.object else 'OBJECT'
+    previous_selected = bpy.context.selected_objects.copy()
+    
+    try:
+        # Deselect all if needed
+        if deselect_all:
+            for obj in bpy.context.selected_objects:
+                obj.select_set(False)
+        
+        # Select and activate target object
+        if select_object:
+            object_ref.select_set(True)
+        bpy.context.view_layer.objects.active = object_ref
+        
+        # Switch to required mode
+        if bpy.context.object and bpy.context.object.mode != mode:
+            bpy.ops.object.mode_set(mode=mode)
+        
+        # Execute operator with proper context override
+        with bpy.context.temp_override(
+            active_object=object_ref,
+            selected_objects=[object_ref] if select_object else [],
+            object=object_ref
+        ):
+            operator()
+            
+    finally:
+        # Restore previous state
+        try:
+            if bpy.context.object and bpy.context.object.mode != previous_mode:
+                bpy.ops.object.mode_set(mode=previous_mode)
+        except:
+            pass
+            
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for obj in previous_selected:
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = previous_active
 
 
 def clean_nla_tracks(rig_object, action):

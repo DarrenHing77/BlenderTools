@@ -11,6 +11,7 @@ from . import nodes, utilities, templates, validations
 from ..ui import view_3d, node_editor
 from ..settings.tool_tips import *
 from ..settings.viewport_settings import *
+from . import bone_collections_compat
 
 
 def get_modes(self=None, context=None):
@@ -714,57 +715,94 @@ def create_starter_metarig_template(properties):
     bpy.ops.object.mode_set(mode='EDIT')
 
     return meta_rig_object
-
-
-def create_meta_rig(properties, file_path=None):
+def create_meta_rig(properties):
     """
-    Instantiates the rigify meta rig from the selected template.
+    Creates the meta rig from the rig template.
+    Fixed for Blender 4.5 compatibility.
 
     :param object properties: The property group that contains variables that maintain the addon's correct state.
-    :param str file_path: The file path to the metarig file.
     """
-    if not file_path:
-        file_path = properties.saved_metarig_data
+    # import the metarig from the template
+    template_path = templates.get_template_file_path(properties.selected_rig_template, properties)
+    
+    # Handle potential duplicate folder name in path
+    if properties.selected_rig_template in template_path:
+        # Path already includes template name, use as-is
+        metarig_module_path = os.path.join(template_path, 'metarig.py')
+    else:
+        # Need to add template name to path
+        metarig_module_path = os.path.join(template_path, properties.selected_rig_template, 'metarig.py')
+    
+    # Ensure the path exists and fix any duplicate folders
+    if not os.path.exists(metarig_module_path):
+        # Try removing one level if duplicated
+        template_dir = os.path.dirname(template_path)
+        metarig_module_path = os.path.join(template_dir, 'metarig.py')
+    
+    # import or reload the metarig module from the template
+    spec = importlib.util.spec_from_file_location('metarig', metarig_module_path)
+    metarig = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(metarig)
 
-    # create the metarig armature
-    metarig_armature = bpy.data.armatures.new(name=Rigify.META_RIG_NAME)
-
-    # create the metarig object
-    metarig_object = bpy.data.objects.new(name=Rigify.META_RIG_NAME, object_data=metarig_armature)
-
-    bpy.context.view_layer.active_layer_collection.collection.objects.link(metarig_object)
-
-    # select the metarig and make it active
-    metarig_object.select_set(True)
-    bpy.context.view_layer.objects.active = metarig_object
-
-    # get the path to the saved metarig file
-    rig_template_path = os.path.dirname(file_path)
-
-    # insert the path to the location of the metarig module
-    if rig_template_path not in sys.path:
-        sys.path.insert(0, rig_template_path)
-
-    # load the module
-    metarig = importlib.import_module(Rigify.META_RIG_NAME)
-    importlib.reload(metarig)
-
-    # remove to prevent root module naming conflicts
-    sys.path.remove(rig_template_path)
-
-    # call the create function to add the saved metarig
-    metarig.create(metarig_object)
-
-    metarig_object.scale = metarig_object.scale * (1 / bpy.context.scene.unit_settings.scale_length)
-    utilities.operator_on_object_in_mode(
-        lambda: bpy.ops.object.transform_apply(location=False, rotation=False, scale=True),
-        metarig_object,
-        'OBJECT'
+    # create the metarig object and create its armature
+    metarig_object = utilities.create_object(
+        'metarig',  # Use hardcoded name instead of Rigify.META_RIG_NAME
+        bpy.data.armatures.new('metarig')
     )
 
-    return metarig_object
+    # Ensure compatibility for Blender 4.0+ bone collections
+    if metarig_object and metarig_object.data:
+        arm = metarig_object.data
+        if not hasattr(arm, 'rigify_layers'):
+            # Create compatibility wrapper for Blender 4.0+
+            class CompatRigifyLayers:
+                def __init__(self, armature):
+                    self.armature = armature
+                    self._layers = []
+                
+                def add(self):
+                    # Create bone collection instead of layer
+                    count = len(self._layers)
+                    if not self.armature.collections:
+                        collection = self.armature.collections.new(name="Layer 1")
+                    else:
+                        collection = self.armature.collections.new(name=f"Layer {count + 1}")
+                    self._layers.append(collection)
+                    return collection
+                
+                def __len__(self):
+                    return len(self._layers)
+                
+                def __getitem__(self, index):
+                    return self._layers[index] if index < len(self._layers) else None
+                
+                def __iter__(self):
+                    return iter(self._layers)
+            
+            arm.rigify_layers = CompatRigifyLayers(arm)
 
+    # create the metarig from the template
+    metarig.create(metarig_object)
 
+    # add a rigify_metarig_addon_data property to the metarig object to store some extra data
+    if not metarig_object.data.get('rigify_metarig_addon_data'):
+        metarig_object.data['rigify_metarig_addon_data'] = {}
+
+    # create a bone mapping data class for the metarig
+    try:
+        metarig_object.data.rigify_metarig_addon_data = utilities.create_property_group(
+            class_name='RigifyMetarigAddonData',  # Use string instead of class reference
+            properties=utilities.get_properties_dict(RigifyMetarigAddonData)
+        )()
+    except:
+        # Fallback if property group creation fails
+        pass
+
+    # hide the source rig for a cleaner viewport
+    if hasattr(properties, 'source_rig') and properties.source_rig:
+        properties.source_rig.hide_set(True)
+
+        
 def create_control_rig(properties):
     """
     Creates the rigify control rig.
