@@ -715,94 +715,38 @@ def create_starter_metarig_template(properties):
     bpy.ops.object.mode_set(mode='EDIT')
 
     return meta_rig_object
+
+
 def create_meta_rig(properties):
     """
     Creates the meta rig from the rig template.
     Fixed for Blender 4.5 compatibility.
-
-    :param object properties: The property group that contains variables that maintain the addon's correct state.
     """
     # import the metarig from the template
     template_path = templates.get_template_file_path(properties.selected_rig_template, properties)
-    
-    # Handle potential duplicate folder name in path
-    if properties.selected_rig_template in template_path:
-        # Path already includes template name, use as-is
-        metarig_module_path = os.path.join(template_path, 'metarig.py')
-    else:
-        # Need to add template name to path
-        metarig_module_path = os.path.join(template_path, properties.selected_rig_template, 'metarig.py')
-    
-    # Ensure the path exists and fix any duplicate folders
-    if not os.path.exists(metarig_module_path):
-        # Try removing one level if duplicated
-        template_dir = os.path.dirname(template_path)
-        metarig_module_path = os.path.join(template_dir, 'metarig.py')
-    
-    # import or reload the metarig module from the template
+    metarig_module_path = os.path.join(template_path, 'metarig.py')
+
+    # import the metarig module from the template
     spec = importlib.util.spec_from_file_location('metarig', metarig_module_path)
     metarig = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(metarig)
 
-    # create the metarig object and create its armature
-    metarig_object = utilities.create_object(
-        'metarig',  # Use hardcoded name instead of Rigify.META_RIG_NAME
-        bpy.data.armatures.new('metarig')
-    )
-
-    # Ensure compatibility for Blender 4.0+ bone collections
-    if metarig_object and metarig_object.data:
-        arm = metarig_object.data
-        if not hasattr(arm, 'rigify_layers'):
-            # Create compatibility wrapper for Blender 4.0+
-            class CompatRigifyLayers:
-                def __init__(self, armature):
-                    self.armature = armature
-                    self._layers = []
-                
-                def add(self):
-                    # Create bone collection instead of layer
-                    count = len(self._layers)
-                    if not self.armature.collections:
-                        collection = self.armature.collections.new(name="Layer 1")
-                    else:
-                        collection = self.armature.collections.new(name=f"Layer {count + 1}")
-                    self._layers.append(collection)
-                    return collection
-                
-                def __len__(self):
-                    return len(self._layers)
-                
-                def __getitem__(self, index):
-                    return self._layers[index] if index < len(self._layers) else None
-                
-                def __iter__(self):
-                    return iter(self._layers)
-            
-            arm.rigify_layers = CompatRigifyLayers(arm)
+    # create the metarig object and armature
+    armature_data = bpy.data.armatures.new('metarig')
+    metarig_object = bpy.data.objects.new('metarig', armature_data)
+    
+    # Link to the current collection
+    bpy.context.collection.objects.link(metarig_object)
+    bpy.context.view_layer.objects.active = metarig_object
+    metarig_object.select_set(True)
 
     # create the metarig from the template
     metarig.create(metarig_object)
-
-    # add a rigify_metarig_addon_data property to the metarig object to store some extra data
-    if not metarig_object.data.get('rigify_metarig_addon_data'):
-        metarig_object.data['rigify_metarig_addon_data'] = {}
-
-    # create a bone mapping data class for the metarig
-    try:
-        metarig_object.data.rigify_metarig_addon_data = utilities.create_property_group(
-            class_name='RigifyMetarigAddonData',  # Use string instead of class reference
-            properties=utilities.get_properties_dict(RigifyMetarigAddonData)
-        )()
-    except:
-        # Fallback if property group creation fails
-        pass
 
     # hide the source rig for a cleaner viewport
     if hasattr(properties, 'source_rig') and properties.source_rig:
         properties.source_rig.hide_set(True)
 
-        
 def create_control_rig(properties):
     """
     Creates the rigify control rig.
