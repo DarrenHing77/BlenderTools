@@ -32,9 +32,16 @@ class Nodes:
 
 
 class Template:
-    RIG_TEMPLATES_PATH = os.path.join(tempfile.gettempdir(), ToolInfo.NAME.value, 'resources', 'rig_templates')
+    RIG_TEMPLATES_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+        'resources', 
+        'rig_templates'
+    )
+    
     DEFAULT_MALE_TEMPLATE = 'male_mannequin'
     DEFAULT_FEMALE_TEMPLATE = 'female_mannequin'
+    
+
 
 
 class Viewport:

@@ -5,13 +5,15 @@ def create(obj):
     bpy.ops.object.mode_set(mode='EDIT')
     arm = obj.data
 
-    # Blender 4.0+ compatibility - skip rigify_layers if not available
+    # SIMPLE APPROACH - Just create basic collections
     if hasattr(arm, 'rigify_layers'):
+        # Blender 3.x
         arm.rigify_layers.add()
     else:
-        # Blender 4.0+ - create bone collection instead
+        # Blender 4.0+ - create basic collections without UI assignment
+        # Let the create_meta_rig function handle UI buttons
         if not arm.collections:
-            arm.collections.new(name="Layer 1")
+            arm.collections.new(name="Primary")
 
     bones = {}
 
@@ -80,7 +82,7 @@ def create(obj):
 
     bone = arm.edit_bones.new('spine.003')
     bone.head[:] = 0.0000, -0.0478, 1.4286
-    bone.tail[:] = 0.0000, -0.0277, 1.6471
+    bone.tail[:] = 0.0000, -0.0247, 1.7813
     bone.roll = 0.0000
     bone.use_connect = True
     bone.parent = arm.edit_bones[bones['spine.002']]
@@ -103,7 +105,7 @@ def create(obj):
     bones['foot.R'] = bone.name
 
     bone = arm.edit_bones.new('shoulder.L')
-    bone.head[:] = 0.0164, -0.0057, 1.6051
+    bone.head[:] = 0.0193, -0.0315, 1.5703
     bone.tail[:] = 0.1627, 0.0015, 1.5846
     bone.roll = 0.0000
     bone.use_connect = False
@@ -111,7 +113,7 @@ def create(obj):
     bones['shoulder.L'] = bone.name
 
     bone = arm.edit_bones.new('shoulder.R')
-    bone.head[:] = -0.0164, -0.0057, 1.6051
+    bone.head[:] = -0.0193, -0.0315, 1.5703
     bone.tail[:] = -0.1627, 0.0015, 1.5846
     bone.roll = 0.0000
     bone.use_connect = False
@@ -119,7 +121,7 @@ def create(obj):
     bones['shoulder.R'] = bone.name
 
     bone = arm.edit_bones.new('neck')
-    bone.head[:] = 0.0000, -0.0277, 1.6471
+    bone.head[:] = 0.0000, -0.0247, 1.7813
     bone.tail[:] = 0.0000, -0.0247, 1.7813
     bone.roll = 0.0000
     bone.use_connect = True
@@ -129,7 +131,7 @@ def create(obj):
     bone = arm.edit_bones.new('toe.L')
     bone.head[:] = 0.0993, -0.0881, 0.0137
     bone.tail[:] = 0.0993, -0.1606, 0.0137
-    bone.roll = -0.0000
+    bone.roll = 0.0000
     bone.use_connect = True
     bone.parent = arm.edit_bones[bones['foot.L']]
     bones['toe.L'] = bone.name
@@ -200,72 +202,62 @@ def create(obj):
 
     bpy.ops.object.mode_set(mode='OBJECT')
     
-    # Set rigify types for pose bones
-    pbone = obj.pose.bones[bones['spine']]
-    pbone.rigify_type = 'spines.spine'
-
-    pbone = obj.pose.bones[bones['pelvis']]
-    pbone.rigify_type = 'spines.spine'
-
-    pbone = obj.pose.bones[bones['thigh.L']]
-    pbone.rigify_type = 'limbs.leg'
-
-    pbone = obj.pose.bones[bones['thigh.R']]
-    pbone.rigify_type = 'limbs.leg'
-
-    pbone = obj.pose.bones[bones['shoulder.L']]
-    pbone.rigify_type = 'basic.super_copy'
-
-    pbone = obj.pose.bones[bones['shoulder.R']]
-    pbone.rigify_type = 'basic.super_copy'
-
-    pbone = obj.pose.bones[bones['neck']]
-    pbone.rigify_type = 'spines.neck_short'
-
-    pbone = obj.pose.bones[bones['toe.L']]
-    pbone.rigify_type = 'limbs.finger'
-
-    pbone = obj.pose.bones[bones['toe.R']]
-    pbone.rigify_type = 'limbs.finger'
-
-    pbone = obj.pose.bones[bones['upper_arm.L']]
-    pbone.rigify_type = 'limbs.arm'
-
-    pbone = obj.pose.bones[bones['upper_arm.R']]
-    pbone.rigify_type = 'limbs.arm'
-
-    pbone = obj.pose.bones[bones['head']]
-    pbone.rigify_type = 'basic.super_copy'
-
-    pbone = obj.pose.bones[bones['hand.L']]
-    pbone.rigify_type = 'basic.super_copy'
-
-    pbone = obj.pose.bones[bones['hand.R']]
-    pbone.rigify_type = 'basic.super_copy'
-
-    # Handle bone collections/layers compatibility
-    bpy.ops.object.mode_set(mode='EDIT')
-    for bone in arm.edit_bones:
-        bone.select = False
-        bone.select_head = False
-        bone.select_tail = False
+    # Set rigify bone types
+    try:
+        pbone = obj.pose.bones[bones['spine']]
+        pbone.rigify_type = 'spines.spine'
+        pbone.lock_location = (False, False, False)
+        pbone.lock_rotation = (False, False, False)
+        pbone.lock_rotation_w = False
+        pbone.lock_scale = (False, False, False)
+        pbone.rotation_mode = 'QUATERNION'
         
-    for b in bones:
-        bone = arm.edit_bones[bones[b]]
-        bone.select = True
-        bone.select_head = True
-        bone.select_tail = True
-        bone.bbone_x = bone.bbone_z = bone.length * 0.05
-        arm.edit_bones.active = bone
+        try:
+            pbone.rigify_parameters.pivot_pos = 2
+        except AttributeError:
+            pass
+        
+        pbone = obj.pose.bones[bones['pelvis']]
+        #pbone.rigify_type = 'spines.spine'
+        pbone.lock_location = (False, False, False)
+        pbone.lock_rotation = (False, False, False)
+        pbone.lock_rotation_w = False
+        pbone.lock_scale = (False, False, False)
+        pbone.rotation_mode = 'QUATERNION'
+        
+        pbone = obj.pose.bones[bones['thigh.L']]
+        pbone.rigify_type = 'limbs.leg'
+        pbone.lock_location = (False, False, False)
+        pbone.lock_rotation = (False, False, False)
+        pbone.lock_rotation_w = False
+        pbone.lock_scale = (False, False, False)
+        pbone.rotation_mode = 'QUATERNION'
+        
+        pbone = obj.pose.bones[bones['thigh.R']]
+        pbone.rigify_type = 'limbs.leg'
+        pbone.lock_location = (False, False, False)
+        pbone.lock_rotation = (False, False, False)
+        pbone.lock_rotation_w = False
+        pbone.lock_scale = (False, False, False)
+        pbone.rotation_mode = 'QUATERNION'
+        
+        pbone = obj.pose.bones[bones['upper_arm.L']]
+        pbone.rigify_type = 'limbs.arm'
+        pbone.lock_location = (False, False, False)
+        pbone.lock_rotation = (False, False, False)
+        pbone.lock_rotation_w = False
+        pbone.lock_scale = (False, False, False)
+        pbone.rotation_mode = 'QUATERNION'
+        
+        pbone = obj.pose.bones[bones['upper_arm.R']]
+        pbone.rigify_type = 'limbs.arm'
+        pbone.lock_location = (False, False, False)
+        pbone.lock_rotation = (False, False, False)
+        pbone.lock_rotation_w = False
+        pbone.lock_scale = (False, False, False)
+        pbone.rotation_mode = 'QUATERNION'
+        
+    except (AttributeError, KeyError) as e:
+        print(f"Error setting rigify parameters: {e}")
 
-        # Bone collection/layer assignment
-        if hasattr(arm, 'collections') and arm.collections:
-            # Blender 4.0+ - assign to first collection
-            collection = arm.collections[0]
-            collection.assign(bone)
-        else:
-            # Blender 3.x - set layer 0
-            bone.layers = [True] + [False] * 31
-
-    bpy.ops.object.mode_set(mode='OBJECT')
-    return bones
+    bpy.ops.object.mode_set(mode='EDIT')

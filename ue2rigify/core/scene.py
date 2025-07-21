@@ -716,15 +716,13 @@ def create_starter_metarig_template(properties):
 
     return meta_rig_object
 
-
 def create_meta_rig(properties):
     """
     Creates the meta rig from the rig template.
-    Fixed for Blender 4.5 compatibility.
+    Fixed for Blender 4.5 compatibility with proper UI button assignment.
     """
-    # import the metarig from the template
-    template_path = templates.get_template_file_path(properties.selected_rig_template, properties)
-    metarig_module_path = os.path.join(template_path, 'metarig.py')
+    # FIX PATH ISSUE - use correct parameter order
+    metarig_module_path = templates.get_template_file_path('metarig.py', properties)
 
     # import the metarig module from the template
     spec = importlib.util.spec_from_file_location('metarig', metarig_module_path)
@@ -743,9 +741,25 @@ def create_meta_rig(properties):
     # create the metarig from the template
     metarig.create(metarig_object)
 
+    # BLENDER 4.5 UI BUTTON FIX - Set rigify_ui_row for ALL bone collections
+    try:
+        arm = metarig_object.data
+        if hasattr(arm, 'collections') and arm.collections:
+            for i, collection in enumerate(arm.collections):
+                if hasattr(collection, 'rigify_ui_row'):
+                    # CRITICAL: Must be > 0 to be valid
+                    collection.rigify_ui_row = i + 1  # Start from 1, not 0
+                    print(f"Set UI row {i + 1} for collection: {collection.name}")
+                    
+            print(f"Fixed UI buttons for {len(arm.collections)} bone collections")
+    except Exception as e:
+        print(f"UI button assignment failed: {e}")
+
     # hide the source rig for a cleaner viewport
     if hasattr(properties, 'source_rig') and properties.source_rig:
         properties.source_rig.hide_set(True)
+        
+    return metarig_object
 
 def create_control_rig(properties):
     """
@@ -1371,7 +1385,7 @@ def save_metadata(properties):
                     'show_in_front': rig_object.show_in_front
                 },
                 'armature': {
-                    'show_group_colors': rig_object.data.show_group_colors,
+                    'show_bone_colors': rig_object.data.show_bone_colors,
                     'show_names': rig_object.data.show_names,
                     'show_bone_custom_shapes': rig_object.data.show_bone_custom_shapes
                 },
